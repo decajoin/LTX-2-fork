@@ -546,6 +546,41 @@ class PromptEncoder:
         logger.info("Prompt encoding complete")
         return result
 
+    @contextmanager
+    def text_encoder_context(self) -> Iterator:
+        """Build the Gemma text encoder and keep it resident until the context exits.
+
+        Splits the build-and-free behaviour of :meth:`__call__` so a long-lived
+        caller (e.g. an inference server) can hold the encoder across many
+        requests and feed it through :meth:`encode_with`.
+        """
+        logger.info("Building resident text encoder from %s", self._gemma_root)
+        with self._text_encoder_ctx() as text_encoder:
+            yield text_encoder
+
+    def encode_with(
+        self,
+        text_encoder: torch.nn.Module,
+        prompts: list[str],
+        *,
+        enhance_first_prompt: bool = False,
+        enhance_prompt_image: str | None = None,
+        enhance_prompt_seed: int = 42,
+    ) -> list[EmbeddingsProcessorOutput]:
+        """Encode *prompts* using an already-resident *text_encoder*.
+
+        The embeddings processor (small) is built and freed per call; the heavy
+        Gemma encoder is supplied by the caller via :meth:`text_encoder_context`.
+        """
+        if enhance_first_prompt:
+            prompts = list(prompts)
+            prompts[0] = generate_enhanced_prompt(
+                text_encoder, prompts[0], enhance_prompt_image, seed=enhance_prompt_seed
+            )
+        raw_outputs = text_encoder.encode(prompts)
+        with gpu_model(self._build_embeddings_processor()) as embeddings_processor:
+            return [embeddings_processor.process_hidden_states(hs, mask) for hs, mask in raw_outputs]
+
 
 # ---------------------------------------------------------------------------
 # ImageConditioner
